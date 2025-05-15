@@ -1,8 +1,35 @@
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import matplotlib.pyplot as plt
 
 from optimizers import *
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def init_distributed_mode(Net, dataset, batch_size):
+
+    dist.init_process_group(backend='gloo')
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    idx_gpu = rank % torch.cuda.device_count()
+
+    model = Net
+    model = model.to(idx_gpu)
+    model.train()
+    model = DDP(model, device_ids=[idx_gpu], output_device=idx_gpu)
+
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=rank
+    )
+
+    dataloader = torch.utils.data.DataLoader(dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+    )
+
+    return model, dataloader
 
 class RegressionModel(torch.nn.Module):
     """

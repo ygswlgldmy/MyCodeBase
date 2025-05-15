@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 import matplotlib.pyplot as plt
-import torch.distributed as dist
 import torchvision
 import torch
 
@@ -10,13 +9,14 @@ from tqdm import tqdm
 from torch.optim import Optimizer
 from torchvision.transforms import ToTensor
 from torch.utils.data import random_split, DataLoader
-from torch.nn.parallel import DistributedDataParallel as DDP
 from dataloader import *
 from utils import *
 
-def do_train(train_loader, test_loader, loss_fn, avail_device, optimizer_mode='sgd', epochs=10, lr=0.01):
+def do_train(Net, train_loader, test_loader, loss_fn, avail_device, optimizer_mode='sgd', epochs=10, lr=0.01):
     
-    model = ClassificationNet(input_channels=3, num_classes=10).to(avail_device)
+    model = Net
+    model = model.to(avail_device)
+    model.train()
     print(model)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
 
@@ -34,6 +34,7 @@ def do_train(train_loader, test_loader, loss_fn, avail_device, optimizer_mode='s
     epoch_loss = 0
 
     for epoch in range(epochs):
+        train_loader.sampler.set_epoch(epoch)
         for batch_idx, (train_img, train_lbl) in enumerate(train_loader):
             
             train_img = train_img.to(avail_device)
@@ -56,12 +57,19 @@ def do_train(train_loader, test_loader, loss_fn, avail_device, optimizer_mode='s
 
     return model, loss_record, accuracy_record
 
-def main(epoch = 30, batch_size=64, optimizer='sgd'):
+def main(epoch = 30, batch_size=64, optimizer='sgd', Net='ClassificationNet'):
 
     transform = ToTensor()
 
-    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=False, transform=transform)
-    test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=False, transform=transform)
+    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+
+    if Net == 'ClassificationNet':
+        Net = ClassificationNet()
+    elif Net == 'RegressionNet':
+        Net = RegressionModel()
+
+    model, train_loader = init_distributed_mode(Net=Net, dataset=train_dataset, batch_size=batch_size)
 
     avail_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {avail_device}")
@@ -89,6 +97,7 @@ def main(epoch = 30, batch_size=64, optimizer='sgd'):
     for lr in loss_record.keys():
         print(f"Training with learning-rate: {lr}")
         model, record_loss, record_acc = do_train(
+                                        model,
                                         train_loader, 
                                         test_loader,
                                         loss_fn, 
