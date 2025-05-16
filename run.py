@@ -2,12 +2,9 @@ import sys
 import runpy
 import os
 
-os.chdir('/Users/user/Desktop/MyCode')
+os.chdir(r'C:\Users\DELL\Desktop\MyProject\Kaggle\dong\\3')
 
-args = "python -m torch.distributed.run \
-  --standalone \
-  --nproc_per_node=2 \
-  main.py"
+args = "python -m torch.distributed.launch --nnodes=1 --nproc_per_node=1 main.py"
 
 args = args.split()
 if args[0] == 'python':

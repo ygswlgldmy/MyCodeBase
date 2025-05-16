@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -6,30 +7,57 @@ import matplotlib.pyplot as plt
 from optimizers import *
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-def init_distributed_mode(Net, dataset, batch_size):
+def DDP_setup(Net, train_dataset, test_dataset, batch_size):
+    """
+        设置主机地址和端口号，这两个环境变量用于配置进程组通信的初始化。
+        MASTER_ADDR指定了负责协调初始化过程的主机地址，在这里设置为'localhost'，
+        表示在单机多GPU的设置中所有的进程都将连接到本地机器上。
+        MASTER_PORT指定了主机监听的端口号，用于进程间的通信。这里设置为'12355'。
+        注意要选择一个未被使用的端口号来进行监听
+    """
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
 
+    # rank是当前进程在进程组中的编号，world_size是总进程数（GPU数量），即进程组的大小。
     dist.init_process_group(backend='gloo')
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    idx_gpu = rank % torch.cuda.device_count()
+    torch.cuda.set_device(rank)
 
     model = Net
-    model = model.to(idx_gpu)
-    model.train()
-    model = DDP(model, device_ids=[idx_gpu], output_device=idx_gpu)
+    model = model.to(rank)
+    model = DDP(model, device_ids=[rank], output_device=rank)
 
-    sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset,
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset,
         num_replicas=world_size,
         rank=rank
     )
 
-    dataloader = torch.utils.data.DataLoader(dataset,
-        batch_size=batch_size,
-        sampler=sampler,
+    test_sampler = torch.utils.data.distributed.DistributedSampler(
+        test_dataset,
+        num_replicas=world_size,
+        rank=rank
     )
 
-    return model, dataloader
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+    )
+
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        sampler=test_sampler,
+    )
+
+    return model, train_loader, test_loader, rank
+
+def DDP_get_model(Net, rank):
+    device = torch.device(f'cuda:{rank}')
+    model = Net.to(device)
+    model = DDP(model, device_ids=[rank], output_device=rank)
 
 class RegressionModel(torch.nn.Module):
     """
@@ -197,6 +225,51 @@ def model_acc(model, test_loader, avail_device):
         accuracy_record.append(epoch_accuracy)
 
         print(f"Test Accuracy: {epoch_accuracy:.4f}")
-        
+
     
     return accuracy_record
+
+def do_train(Net, train_loader, test_loader, loss_fn, avail_device, optimizer_mode='sgd', epochs=10, lr=0.01):
+    
+    model = Net
+    model = model.to(avail_device)
+    model.train()
+    print(model)
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+
+    optimizer = MyOptimizer(
+                        model.parameters(), 
+                        mode=optimizer_mode, 
+                        lr=lr,
+                        momentum=0.9,
+                        betas=(0.9, 0.999),
+                        eps=1e-8
+                    )
+
+    model.train()
+    loss_record = []
+    epoch_loss = 0
+
+    for epoch in range(epochs):
+        train_loader.sampler.set_epoch(epoch)
+        for batch_idx, (train_img, train_lbl) in enumerate(train_loader):
+            
+            train_img = train_img.to(avail_device)
+            train_lbl = train_lbl.to(avail_device)
+            
+            optimizer.zero_grad()
+            y_pred = model(train_img)
+            loss = loss_fn(y_pred, train_lbl)
+            epoch_loss += loss.detach().item()
+            loss.backward()
+            optimizer.step()
+
+        loss_record.append(epoch_loss / len(train_loader))
+        epoch_loss = 0
+
+        if (epoch+1) % 5 == 0:
+            print(f"Epoch {epoch+1}, Loss: {loss_record[-1]}, Optimizer: {optimizer_mode}, LR: {lr}")
+    
+    accuracy_record = model_acc(model, test_loader, avail_device)
+
+    return model, loss_record, accuracy_record

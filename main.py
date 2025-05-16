@@ -12,70 +12,25 @@ from torch.utils.data import random_split, DataLoader
 from dataloader import *
 from utils import *
 
-def do_train(Net, train_loader, test_loader, loss_fn, avail_device, optimizer_mode='sgd', epochs=10, lr=0.01):
-    
-    model = Net
-    model = model.to(avail_device)
-    model.train()
-    print(model)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
-
-    optimizer = MyOptimizer(
-                        model.parameters(), 
-                        mode=optimizer_mode, 
-                        lr=lr,
-                        momentum=0.9,
-                        betas=(0.9, 0.999),
-                        eps=1e-8
-                    )
-
-    model.train()
-    loss_record = []
-    epoch_loss = 0
-
-    for epoch in range(epochs):
-        train_loader.sampler.set_epoch(epoch)
-        for batch_idx, (train_img, train_lbl) in enumerate(train_loader):
-            
-            train_img = train_img.to(avail_device)
-            train_lbl = train_lbl.to(avail_device)
-            
-            optimizer.zero_grad()
-            y_pred = model(train_img)
-            loss = loss_fn(y_pred, train_lbl)
-            epoch_loss += loss.detach().item()
-            loss.backward()
-            optimizer.step()
-
-        loss_record.append(epoch_loss / len(train_loader))
-        epoch_loss = 0
-
-        if (epoch+1) % 5 == 0:
-            print(f"Epoch {epoch+1}, Loss: {loss_record[-1]}, Optimizer: {optimizer_mode}, LR: {lr}")
-    
-    accuracy_record = model_acc(model, test_loader, avail_device)
-
-    return model, loss_record, accuracy_record
-
 def main(epoch = 30, batch_size=64, optimizer='sgd', Net='ClassificationNet'):
 
     transform = ToTensor()
 
-    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=False, transform=transform)
+    test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=False, transform=transform)
 
     if Net == 'ClassificationNet':
         Net = ClassificationNet()
     elif Net == 'RegressionNet':
         Net = RegressionModel()
 
-    model, train_loader = init_distributed_mode(Net=Net, dataset=train_dataset, batch_size=batch_size)
+    model, train_loader, test_loader, avail_device = DDP_setup(Net=Net, train_dataset=train_dataset, test_dataset=test_dataset, batch_size=batch_size)
 
-    avail_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {avail_device}")
+    # avail_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # print(f"Using device: {avail_device}")
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     print(f"Train samples: {len(train_loader)*batch_size}, Test Samples: {len(test_loader)*batch_size}")
     
@@ -124,6 +79,8 @@ def main(epoch = 30, batch_size=64, optimizer='sgd', Net='ClassificationNet'):
 if __name__ == "__main__":
 
     torch.manual_seed(42)
+
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
     main(
         epoch=30,
