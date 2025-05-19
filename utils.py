@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -15,18 +16,21 @@ def DDP_setup(Net, train_dataset, test_dataset, batch_size):
         MASTER_PORT指定了主机监听的端口号，用于进程间的通信。这里设置为'12355'。
         注意要选择一个未被使用的端口号来进行监听
     """
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    # os.environ['MASTER_ADDR'] = 'localhost'
+    # os.environ['MASTER_PORT'] = '12355'
 
     # rank是当前进程在进程组中的编号，world_size是总进程数（GPU数量），即进程组的大小。
     dist.init_process_group(backend='gloo')
     rank = dist.get_rank()
+    device_id = rank % torch.cuda.device_count()
     world_size = dist.get_world_size()
-    torch.cuda.set_device(rank)
-
+    
     model = Net
-    model = model.to(rank)
-    model = DDP(model, device_ids=[rank], output_device=rank)
+    if rank == 0:
+        print(model)
+        print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+    model = model.to(device_id)
+    model = DDP(model, device_ids=[device_id], output_device=device_id)
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dataset,
@@ -52,7 +56,7 @@ def DDP_setup(Net, train_dataset, test_dataset, batch_size):
         sampler=test_sampler,
     )
 
-    return model, train_loader, test_loader, rank
+    return model, train_loader, test_loader, device_id, rank
 
 def DDP_get_model(Net, rank):
     device = torch.device(f'cuda:{rank}')
@@ -147,11 +151,18 @@ class MyOptimizer(torch.optim.Optimizer):
         ):
 
         if mode == 'sgd':
-            self.optimizer = MySGD(params, lr=lr, momentum=0.9)
+            self.optimizer = MySGD(params, lr=lr, momentum=momentum)
         elif mode == 'adam':
-            self.optimizer = MyAdam(params, lr=lr, betas=(0.9, 0.999), eps=1e-8)
+            self.optimizer = MyAdam(params, lr=lr, betas=betas, eps=eps)
         elif mode == 'adagrad':
-            self.optimizer = MyAdaGrad(params, lr=lr, eps=1e-10)
+            self.optimizer = MyAdaGrad(params, lr=lr, eps=eps)
+        elif mode == 'adam_official':
+            self.optimizer = torch.optim.Adam(
+                params, 
+                lr=lr, 
+                betas=betas, 
+                eps=eps
+            )
         else:
             raise ValueError("Unsupported optimizer mode")
     
@@ -163,7 +174,7 @@ class MyOptimizer(torch.optim.Optimizer):
 
 def plot_loss_comparison(
                         loss_records,
-                        title='Loss Curves Comparison'
+                        optimizer='sgd',
                     ):
     
     plt.figure(figsize=(10, 6))
@@ -172,16 +183,16 @@ def plot_loss_comparison(
     
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
-    plt.title(title)
+    plt.title(f'Loss Curves Comparison: {optimizer}')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.yscale('log')  # Log scale for better visualization of differences
     plt.tight_layout()
-    plt.savefig("loss_comparison.png")
+    plt.savefig(f"Loss_comparison_{optimizer}.png")
 
 def plot_accuracy_comparison(
                         accuracy_records,
-                        title='Accuracy Curves Comparison'
+                        optimizer='sgd',
                     ):
     
     plt.figure(figsize=(10, 6))
@@ -190,16 +201,15 @@ def plot_accuracy_comparison(
     
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
-    plt.title(title)
+    plt.title(f"Accuracy Curves Comparison: {optimizer}")
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    plt.savefig("accuracy_comparison.png")
+    plt.savefig(f"Accuracy_comparison_{optimizer}.png")
 
 def model_acc(model, test_loader, avail_device):
 
     epoch_accuracy = 0
-    accuracy_record = []
 
     model.eval()
     with torch.no_grad():
@@ -222,34 +232,38 @@ def model_acc(model, test_loader, avail_device):
 
         # 计算整体准确率
         epoch_accuracy = total_correct / total_samples
-        accuracy_record.append(epoch_accuracy)
-
-        print(f"Test Accuracy: {epoch_accuracy:.4f}")
-
     
-    return accuracy_record
+    return epoch_accuracy
 
-def do_train(Net, train_loader, test_loader, loss_fn, avail_device, optimizer_mode='sgd', epochs=10, lr=0.01):
-    
-    model = Net
-    model = model.to(avail_device)
-    model.train()
-    print(model)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+def do_train(model, 
+            train_loader, 
+            test_loader, 
+            loss_fn, 
+            rank, 
+            avail_device, 
+            optimizer_mode='sgd', 
+            epochs=10, 
+            lr=0.01,
+            momentum=0.9,
+            betas=(0.9, 0.999),
+            eps=1e-8
+        ):
 
     optimizer = MyOptimizer(
                         model.parameters(), 
                         mode=optimizer_mode, 
                         lr=lr,
-                        momentum=0.9,
-                        betas=(0.9, 0.999),
-                        eps=1e-8
+                        momentum=momentum,
+                        betas=betas,
+                        eps=eps
                     )
 
     model.train()
     loss_record = []
+    accuracy_record = []
     epoch_loss = 0
 
+    epoch_begin_time = time.time()
     for epoch in range(epochs):
         train_loader.sampler.set_epoch(epoch)
         for batch_idx, (train_img, train_lbl) in enumerate(train_loader):
@@ -267,9 +281,14 @@ def do_train(Net, train_loader, test_loader, loss_fn, avail_device, optimizer_mo
         loss_record.append(epoch_loss / len(train_loader))
         epoch_loss = 0
 
-        if (epoch+1) % 5 == 0:
-            print(f"Epoch {epoch+1}, Loss: {loss_record[-1]}, Optimizer: {optimizer_mode}, LR: {lr}")
-    
-    accuracy_record = model_acc(model, test_loader, avail_device)
+        accuracy = model_acc(model, test_loader, avail_device)
+        accuracy_record.append(accuracy)
+
+        if (epoch+1) % 5 == 0 and rank == 0:
+            print(f"Epoch {epoch+1}, Acc: {accuracy_record[-1]} , Loss: {loss_record[-1]}, Optimizer: {optimizer_mode}, LR: {lr}")
+
+    epoch_end_time = time.time()
+    if rank == 0:
+        print(f"Training time: {epoch_end_time - epoch_begin_time:.2f} seconds")
 
     return model, loss_record, accuracy_record
